@@ -1,26 +1,28 @@
-# Whitech Helper v8 — Fast FAQ
+# Whitech Helper v8.1 — Fast Router
 
-Routing: `question -> FAST FAQ -> Confluence -> OpenAI`.
+Fast layer now supports data-driven:
+- `answer`
+- `jira_link`
+- `section_link`
 
-Fast FAQ answers require no OpenAI/Confluence request and are stored in `faq.json`.
-Each topic contains many question variants, keywords and an approved answer.
+Routing:
+`question -> fast router -> Confluence/OpenAI fallback`
 
-Included:
-- grade growth
-- Weekly Global Report + clarification for generic weekly report
-- dismissal process + direct Jira dismissal form
-- VPN Jira form
-- extra equipment Jira form + remote employee condition
-- onboarding
+To add or edit most fast topics later, edit only `faq.json`.
 
-FAQ matcher is conservative. If confidence is low, the existing Confluence + OpenAI flow runs.
+Schema:
+- id
+- type
+- enabled
+- variants
+- keywords
+- aliases
+- answer (for answer)
+- title/url/intro/source (for links)
 
-Hard Confluence fallback scope remains `ancestor=3621748974`. No Jira API is called.
+Includes expanded question variability and navigation links for traffic/FAME, polygraph, reporting, vacation, KDP, tools/access, legal, business trips, referrals, office, chats, LPR, templates, task setting, MFU, management, 1:1, iGaming, GGR/NGR, domains, PM materials, licenses, STUFF and more.
 
-Logs:
-`FAST_FAQ hit id=... score=...`
-or
-`FAST_FAQ miss best_score=...; using Confluence`
+All Confluence section links were selected from pages returned by the hard allowed-tree query:
+`space="pmprod" AND type=page AND ancestor=3621748974`.
 
-Expected startup:
-`Starting Whitech Helper v8-fast-faq; ...`
+Jira API is not called. Approved Jira links are static fast links.
