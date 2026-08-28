@@ -35,6 +35,9 @@ ATLASSIAN_API_TOKEN = required("ATLASSIAN_API_TOKEN")
 CONFLUENCE_SPACE_KEY = os.getenv("CONFLUENCE_SPACE_KEY", "pmprod")
 ALLOWED_ROOT_PAGE_ID = os.getenv("ALLOWED_ROOT_PAGE_ID", "3621748974")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5-mini")
+OPENAI_MAX_OUTPUT_TOKENS = int(os.getenv("OPENAI_MAX_OUTPUT_TOKENS", "3000"))
+OPENAI_RETRY_MAX_OUTPUT_TOKENS = int(os.getenv("OPENAI_RETRY_MAX_OUTPUT_TOKENS", "5000"))
+OPENAI_REASONING_EFFORT = os.getenv("OPENAI_REASONING_EFFORT", "low")
 
 bot = Bot(TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
@@ -61,7 +64,7 @@ FAQ_ALIASES = {
     "админы":"sysadm","ретен":"retention","ретеншен":"retention","релокация":"relocation",
     "релокейт":"relocation","офбординг":"offboarding","онборд":"onboarding","онбординг":"onboarding",
     "новичок":"onboarding","новичка":"onboarding","нового":"new_employee","сотрудника":"employee",
-    "грейд":"grade","полиграфа":"полиграф","полиграфом":"полиграф","полиграфе":"полиграф",
+    "грейд":"grade","греид":"grade","грейд":"grade","grade":"grade","мидл":"middle","миддл":"middle","мидлом":"middle","миддлом":"middle","полиграфа":"полиграф","полиграфом":"полиграф","полиграфе":"полиграф",
     "трафика":"трафик","трафику":"трафик","обучалка":"обучение","обучалку":"обучение","обучалки":"обучение",
     "порекомендовать":"рекомендация","порекомендую":"рекомендация","рекомендовать":"рекомендация",
     "моник":"equipment","монитор":"equipment","оборудование":"equipment","техника":"equipment","ноут":"equipment","ноутбук":"equipment",
@@ -183,8 +186,13 @@ SYNONYMS = {
     "сис": ["system administrator", "IT"],
     "админов": ["system administrator", "IT"],
     "кдп": ["HR", "кадровое"],
-    "грейд": ["grade", "грейды"],
-    "грейды": ["grade", "грейд"],
+    "грейд": ["grade", "грейды", "греид"],
+    "греид": ["grade", "грейд", "грейды"],
+    "grade": ["грейд", "грейды"],
+    "мидл": ["middle", "миддл"],
+    "миддл": ["middle", "мидл"],
+    "middle": ["мидл", "миддл"],
+    "грейды": ["grade", "грейд", "греид"],
     "недельный": ["weekly", "еженедельный"],
     "отчет": ["отчёт", "report"],
     "отчёт": ["отчет", "report"],
@@ -361,14 +369,47 @@ CONTENT:
 - Содержимое Confluence вне разрешённого дерева не используй. Если ссылка на внешнюю страницу буквально есть в разрешённом SOURCE, саму ссылку показать можно.
 - Учитывай КОНТЕКСТ для продолжения разговора, но факты всё равно должны быть подтверждены SOURCE.
 """
-    response = await openai.responses.create(
-        model=OPENAI_MODEL,
-        instructions=instructions,
-        input=f"КОНТЕКСТ:\n{conversation}\n\nВОПРОС:\n{question}\n\nSOURCE:\n{context}",
-        max_output_tokens=1200,
-    )
-    log.info("TIMING final_answer=%.2fs", time.perf_counter() - t0)
+    model_input = f"КОНТЕКСТ:\n{conversation}\n\nВОПРОС:\n{question}\n\nSOURCE:\n{context}"
+
+    async def call_model(max_tokens: int):
+        return await openai.responses.create(
+            model=OPENAI_MODEL,
+            instructions=instructions,
+            input=model_input,
+            max_output_tokens=max_tokens,
+            reasoning={"effort": OPENAI_REASONING_EFFORT},
+        )
+
+    response = await call_model(OPENAI_MAX_OUTPUT_TOKENS)
     answer = (response.output_text or "").strip()
+
+    def usage_fields(resp):
+        usage = getattr(resp, "usage", None)
+        out_details = getattr(usage, "output_tokens_details", None) if usage else None
+        return {
+            "input_tokens": getattr(usage, "input_tokens", None),
+            "output_tokens": getattr(usage, "output_tokens", None),
+            "reasoning_tokens": getattr(out_details, "reasoning_tokens", None),
+            "total_tokens": getattr(usage, "total_tokens", None),
+        }
+
+    status = getattr(response, "status", None)
+    incomplete = getattr(response, "incomplete_details", None)
+    reason = getattr(incomplete, "reason", None) if incomplete else None
+    first_usage = usage_fields(response)
+
+    # A reasoning model can spend the whole output budget on reasoning and emit no text.
+    # Retry once only for that specific, recoverable condition.
+    if not answer and status == "incomplete" and reason == "max_output_tokens":
+        analytics("openai_retry", reason="max_output_tokens", first_max_output_tokens=OPENAI_MAX_OUTPUT_TOKENS, **first_usage)
+        log.warning("OpenAI exhausted output budget; retrying once max_output_tokens=%d", OPENAI_RETRY_MAX_OUTPUT_TOKENS)
+        response = await call_model(OPENAI_RETRY_MAX_OUTPUT_TOKENS)
+        answer = (response.output_text or "").strip()
+
+    log.info("TIMING final_answer=%.2fs", time.perf_counter() - t0)
+    final_usage = usage_fields(response)
+    analytics("openai_usage", response_status=str(getattr(response, "status", None)), reasoning_effort=OPENAI_REASONING_EFFORT, **final_usage)
+
     if not answer:
         status=getattr(response, "status", None)
         incomplete=getattr(response, "incomplete_details", None)
@@ -376,7 +417,7 @@ CONTENT:
         output=getattr(response, "output", None)
         log.warning("OpenAI returned empty output status=%r incomplete_details=%r usage=%r output_types=%r",
                     status, incomplete, usage, [getattr(x, "type", None) for x in (output or [])])
-        analytics("empty_model_output", response_status=str(status), incomplete_details=str(incomplete), usage=str(usage))
+        analytics("empty_model_output", response_status=str(status), incomplete_details=str(incomplete), **final_usage)
         return "Не нашёл эту информацию в базе знаний Whitech 😔 Напишите @MiaA_01t — она поможет разобраться."
     return answer
 
@@ -463,7 +504,7 @@ async def question(message: Message):
 
 async def main():
     log.info(
-        "Starting Whitech Helper v8.3-intent-retrieval; space=%s root=%s model=%s",
+        "Starting Whitech Helper v8.3.1-output-budget; space=%s root=%s model=%s",
         CONFLUENCE_SPACE_KEY, ALLOWED_ROOT_PAGE_ID, OPENAI_MODEL
     )
     try:
