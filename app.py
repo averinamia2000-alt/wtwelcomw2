@@ -56,21 +56,41 @@ with open(FAQ_PATH, "r", encoding="utf-8") as fh:
 FAQ_STOPWORDS = {"как","где","что","кто","куда","мне","можно","могу","ли","я","мы","вы","это","дай","дайте","нужно","надо","хочу","пожалуйста","плиз","на","в","во","из","по","к","с","и","или","а","у","про","об","о"}
 
 FAQ_ALIASES = {
-    "впн": "vpn", "жира": "jira", "джира": "jira", "сисадмин": "sysadm",
-    "сисадмины": "sysadm", "админы": "sysadm", "ретен": "retention",
-    "релокация": "relocation", "релокейт": "relocation", "офбординг": "offboarding",
-    "онборд": "onboarding", "онбординг": "onboarding", "грейд": "grade",
-    "отчёт": "отчет", "еженедельный": "weekly", "недельный": "weekly",
-    "полиграфа": "полиграф", "трафика": "трафик"
+    "впн":"vpn","жира":"jira","джира":"jira","сисадмин":"sysadm","сисадмины":"sysadm",
+    "админы":"sysadm","ретен":"retention","ретеншен":"retention","релокация":"relocation",
+    "релокейт":"relocation","офбординг":"offboarding","онборд":"onboarding","онбординг":"onboarding",
+    "грейд":"grade","полиграфа":"полиграф","трафика":"трафик","трафику":"трафик",
+    "обучалка":"обучение","обучалку":"обучение","обучалки":"обучение",
+    "порекомендовать":"рекомендация","порекомендую":"рекомендация","рекомендовать":"рекомендация",
+    "моник":"монитор","ноут":"ноутбук","фоллоуап":"follow-up","фоллоуапы":"follow-up"
 }
+FAQ_NOISE = {
+    "дай","дайте","скинь","скиньте","кинь","киньте","плиз","пожалуйста","мне","бы","где","как",
+    "что","кто","куда","кому","за","про","по","на","в","во","и","а","ли","это","там","есть",
+    "нужен","нужна","нужно","хочу","можно","инфа","инфу"
+}
+RU_SUFFIXES = ("ами","ями","ого","ему","ому","ими","ыми","ах","ях","ам","ям","ов","ев","ей","ой","ий","ый","ая","яя","ое","ее","ую","юю","ом","ем","ы","и","а","я","у","ю","е")
+
+def _faq_word(word: str) -> str:
+    w = word.lower().replace("ё","е")
+    if w in FAQ_ALIASES:
+        return FAQ_ALIASES[w]
+    # conservative Russian suffix stripping, only for longer words
+    if len(w) >= 7:
+        for s in RU_SUFFIXES:
+            if w.endswith(s) and len(w)-len(s) >= 4:
+                stem=w[:-len(s)]
+                return FAQ_ALIASES.get(stem, stem)
+    return w
 
 def faq_tokens(text: str) -> set[str]:
-    raw = [x.lower().replace("ё","е") for x in re.findall(r"[A-Za-zА-Яа-яЁё0-9._-]+", text)]
-    out = set()
+    raw = re.findall(r"[A-Za-zА-Яа-яЁё0-9._:-]+", text)
+    out=set()
     for x in raw:
-        if len(x) < 2 or x in FAQ_STOPWORDS:
+        low=x.lower().replace("ё","е")
+        if len(low)<2 or low in FAQ_STOPWORDS or low in FAQ_NOISE:
             continue
-        out.add(FAQ_ALIASES.get(x, x))
+        out.add(_faq_word(low))
     return out
 
 def render_fast_item(item: dict) -> str:
@@ -86,6 +106,8 @@ def render_fast_item(item: dict) -> str:
         parts.append(intro)
     elif item.get("type") == "jira_link":
         parts.append(f"{title} 👇")
+    elif item.get("type") == "contact":
+        parts.append(intro or f"Вот нужный контакт: {title} 👇")
     else:
         parts.append(f"Вот нужный раздел: {title} 👇")
     if url:
@@ -396,7 +418,7 @@ async def question(message: Message):
 
 async def main():
     log.info(
-        "Starting Whitech Helper v8.1-fast-router; space=%s root=%s model=%s",
+        "Starting Whitech Helper v8.2-robust-router; space=%s root=%s model=%s",
         CONFLUENCE_SPACE_KEY, ALLOWED_ROOT_PAGE_ID, OPENAI_MODEL
     )
     try:
