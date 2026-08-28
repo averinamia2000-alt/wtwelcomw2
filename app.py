@@ -55,15 +55,53 @@ with open(FAQ_PATH, "r", encoding="utf-8") as fh:
 
 FAQ_STOPWORDS = {"как","где","что","кто","куда","мне","можно","могу","ли","я","мы","вы","это","дай","дайте","нужно","надо","хочу","пожалуйста","плиз","на","в","во","из","по","к","с","и","или","а","у","про","об","о"}
 
+FAQ_ALIASES = {
+    "впн": "vpn", "жира": "jira", "джира": "jira", "сисадмин": "sysadm",
+    "сисадмины": "sysadm", "админы": "sysadm", "ретен": "retention",
+    "релокация": "relocation", "релокейт": "relocation", "офбординг": "offboarding",
+    "онборд": "onboarding", "онбординг": "onboarding", "грейд": "grade",
+    "отчёт": "отчет", "еженедельный": "weekly", "недельный": "weekly",
+    "полиграфа": "полиграф", "трафика": "трафик"
+}
+
 def faq_tokens(text: str) -> set[str]:
-    return {x.lower().replace("ё","е") for x in re.findall(r"[A-Za-zА-Яа-яЁё0-9._-]+", text)
-            if len(x) >= 2 and x.lower() not in FAQ_STOPWORDS}
+    raw = [x.lower().replace("ё","е") for x in re.findall(r"[A-Za-zА-Яа-яЁё0-9._-]+", text)]
+    out = set()
+    for x in raw:
+        if len(x) < 2 or x in FAQ_STOPWORDS:
+            continue
+        out.add(FAQ_ALIASES.get(x, x))
+    return out
+
+def render_fast_item(item: dict) -> str:
+    # FAQ content is data-driven. New entries normally require only faq.json edits.
+    if item.get("answer"):
+        return item["answer"].strip()
+    title = item.get("title") or "Вот нужная ссылка"
+    url = item.get("url", "").strip()
+    intro = item.get("intro", "").strip()
+    source = item.get("source", "").strip()
+    parts = []
+    if intro:
+        parts.append(intro)
+    elif item.get("type") == "jira_link":
+        parts.append(f"{title} 👇")
+    else:
+        parts.append(f"Вот нужный раздел: {title} 👇")
+    if url:
+        parts.append(f"🔗 {url}")
+    if source and source != url:
+        parts.append(f"📚 Источник: {source}")
+    return "\n\n".join(parts).strip()
 
 def find_fast_faq(question: str):
     q_norm = " ".join(question.lower().replace("ё","е").split())
     q_tokens = faq_tokens(question)
     best, best_score = None, 0.0
     for item in FAST_FAQ:
+        if not item.get("enabled", True):
+            continue
+        topic_tokens = faq_tokens(" ".join(item.get("keywords", []) + item.get("aliases", [])))
         for variant in item.get("variants", []):
             v_norm = " ".join(variant.lower().replace("ё","е").split())
             v_tokens = faq_tokens(variant)
@@ -73,14 +111,16 @@ def find_fast_faq(question: str):
                 score = 0.94
             elif v_tokens:
                 overlap = len(q_tokens & v_tokens)
-                score = 0.55 * (overlap / max(1, len(q_tokens))) + 0.45 * (overlap / len(v_tokens))
+                score = 0.55*(overlap/max(1,len(q_tokens))) + 0.45*(overlap/len(v_tokens))
             else:
                 score = 0.0
-            topic_tokens = faq_tokens(" ".join(item.get("keywords", [])))
             if topic_tokens and not (q_tokens & topic_tokens):
                 score *= 0.4
+            # navigation phrases slightly favor section links
+            if item.get("type") == "section_link" and any(p in q_norm for p in ["где почитать","дай ссылку","скинь ссылку","обучалк","материал","раздел","где найти"]):
+                score += 0.05
             if score > best_score:
-                best, best_score = item, score
+                best, best_score = item, min(score, 1.0)
     return (best, best_score) if best and best_score >= 0.72 else (None, best_score)
 
 STOPWORDS = {
@@ -285,7 +325,7 @@ async def build_answer(question: str, chat_id: int) -> str:
         elapsed = round(time.perf_counter() - t0, 4)
         log.info("FAST_FAQ hit id=%s score=%.3f", faq_item["id"], faq_score)
         analytics("fast_faq", faq_id=faq_item["id"], latency_seconds=elapsed)
-        return faq_item["answer"]
+        return render_fast_item(faq_item)
 
     log.info("FAST_FAQ miss best_score=%.3f; using Confluence", faq_score)
     conversation = compact_history(chat_id)
@@ -356,7 +396,7 @@ async def question(message: Message):
 
 async def main():
     log.info(
-        "Starting Whitech Helper v8-fast-faq; space=%s root=%s model=%s",
+        "Starting Whitech Helper v8.1-fast-router; space=%s root=%s model=%s",
         CONFLUENCE_SPACE_KEY, ALLOWED_ROOT_PAGE_ID, OPENAI_MODEL
     )
     try:
