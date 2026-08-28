@@ -26,3 +26,11 @@ All Confluence section links were selected from pages returned by the hard allow
 `space="pmprod" AND type=page AND ancestor=3621748974`.
 
 Jira API is not called. Approved Jira links are static fast links.
+
+## v8.2 Robust Router
+- conversational FAQ normalization and lightweight Russian word-form handling
+- expanded natural-language variants
+- noisy retrieval words removed
+- `contact` type supported by renderer for future verified contact entries
+- richer diagnostics for empty OpenAI Responses output
+- no unverified SysAdm/Retention contacts were hardcoded
