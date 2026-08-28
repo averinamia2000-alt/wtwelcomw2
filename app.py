@@ -48,6 +48,7 @@ confluence = httpx.AsyncClient(
 )
 
 history: dict[int, deque] = defaultdict(lambda: deque(maxlen=6))
+user_locks: dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
 
 FAQ_PATH = os.path.join(os.path.dirname(__file__), "faq.json")
 with open(FAQ_PATH, "r", encoding="utf-8") as fh:
@@ -59,27 +60,38 @@ FAQ_ALIASES = {
     "впн":"vpn","жира":"jira","джира":"jira","сисадмин":"sysadm","сисадмины":"sysadm",
     "админы":"sysadm","ретен":"retention","ретеншен":"retention","релокация":"relocation",
     "релокейт":"relocation","офбординг":"offboarding","онборд":"onboarding","онбординг":"onboarding",
-    "грейд":"grade","полиграфа":"полиграф","трафика":"трафик","трафику":"трафик",
-    "обучалка":"обучение","обучалку":"обучение","обучалки":"обучение",
+    "новичок":"onboarding","новичка":"onboarding","нового":"new_employee","сотрудника":"employee",
+    "грейд":"grade","полиграфа":"полиграф","полиграфом":"полиграф","полиграфе":"полиграф",
+    "трафика":"трафик","трафику":"трафик","обучалка":"обучение","обучалку":"обучение","обучалки":"обучение",
     "порекомендовать":"рекомендация","порекомендую":"рекомендация","рекомендовать":"рекомендация",
-    "моник":"монитор","ноут":"ноутбук","фоллоуап":"follow-up","фоллоуапы":"follow-up"
+    "моник":"equipment","монитор":"equipment","оборудование":"equipment","техника":"equipment","ноут":"equipment","ноутбук":"equipment",
+    "фоллоуап":"follow-up","фоллоуапы":"follow-up","ответственных":"лпр","ответственные":"лпр"
 }
 FAQ_NOISE = {
-    "дай","дайте","скинь","скиньте","кинь","киньте","плиз","пожалуйста","мне","бы","где","как",
-    "что","кто","куда","кому","за","про","по","на","в","во","и","а","ли","это","там","есть",
-    "нужен","нужна","нужно","хочу","можно","инфа","инфу"
+    "дай","дайте","скинь","скиньте","кинь","киньте","кинуть","плиз","пожалуйста","мне","бы","где","как",
+    "что","кто","куда","кому","за","про","по","на","в","во","и","а","ли","это","там","есть","посмотреть",
+    "нужен","нужна","нужно","хочу","можно","инфа","инфу","заявку","заявка"
 }
 RU_SUFFIXES = ("ами","ями","ого","ему","ому","ими","ыми","ах","ях","ам","ям","ов","ев","ей","ой","ий","ый","ая","яя","ое","ее","ую","юю","ом","ем","ы","и","а","я","у","ю","е")
+NAV_PHRASES = ("где почитать","дай ссылку","скинь ссылку","кинь ссылку","где найти","где посмотреть","обучалк","материал","раздел","что такое")
+SITUATIONAL_PHRASES = ("почему","как улучшить","что делать если","что делать, если","стоит ли","помоги решить","упал","упала","упало","ухудш","конфликт","недоволен","не работает","плохо работает")
+
+CONCEPT_GROUPS = {
+    "onboarding": {"onboarding","new_employee","employee","выходит","первый","день"},
+    "equipment": {"equipment","доп","дозаказ"},
+    "vpn": {"vpn"},
+    "polygraph": {"полиграф"},
+    "lpr": {"лпр","отделам","отдел"},
+}
 
 def _faq_word(word: str) -> str:
     w = word.lower().replace("ё","е")
     if w in FAQ_ALIASES:
         return FAQ_ALIASES[w]
-    # conservative Russian suffix stripping, only for longer words
     if len(w) >= 7:
-        for s in RU_SUFFIXES:
-            if w.endswith(s) and len(w)-len(s) >= 4:
-                stem=w[:-len(s)]
+        for sfx in RU_SUFFIXES:
+            if w.endswith(sfx) and len(w)-len(sfx) >= 4:
+                stem=w[:-len(sfx)]
                 return FAQ_ALIASES.get(stem, stem)
     return w
 
@@ -94,56 +106,59 @@ def faq_tokens(text: str) -> set[str]:
     return out
 
 def render_fast_item(item: dict) -> str:
-    # FAQ content is data-driven. New entries normally require only faq.json edits.
     if item.get("answer"):
         return item["answer"].strip()
     title = item.get("title") or "Вот нужная ссылка"
     url = item.get("url", "").strip()
     intro = item.get("intro", "").strip()
     source = item.get("source", "").strip()
-    parts = []
-    if intro:
-        parts.append(intro)
-    elif item.get("type") == "jira_link":
-        parts.append(f"{title} 👇")
-    elif item.get("type") == "contact":
-        parts.append(intro or f"Вот нужный контакт: {title} 👇")
-    else:
-        parts.append(f"Вот нужный раздел: {title} 👇")
-    if url:
-        parts.append(f"🔗 {url}")
-    if source and source != url:
-        parts.append(f"📚 Источник: {source}")
+    parts = [intro] if intro else []
+    if not parts:
+        if item.get("type") == "contact": parts.append(f"Вот нужный контакт: {title} 👇")
+        elif item.get("type") == "jira_link": parts.append(f"{title} 👇")
+        else: parts.append(f"Вот нужный раздел: {title} 👇")
+    if url: parts.append(f"🔗 {url}")
+    if source and source != url: parts.append(f"📚 Источник: {source}")
     return "\n\n".join(parts).strip()
+
+def _concept_bonus(item: dict, q_tokens: set[str]) -> float:
+    corpus = faq_tokens(" ".join(item.get("keywords", []) + item.get("aliases", []) + item.get("variants", [])))
+    bonus=0.0
+    for concept_tokens in CONCEPT_GROUPS.values():
+        if q_tokens & concept_tokens and corpus & concept_tokens:
+            bonus=max(bonus, 0.16)
+    return bonus
 
 def find_fast_faq(question: str):
     q_norm = " ".join(question.lower().replace("ё","е").split())
     q_tokens = faq_tokens(question)
-    best, best_score = None, 0.0
+    situational = any(p in q_norm for p in SITUATIONAL_PHRASES)
+    navigational = any(p in q_norm for p in NAV_PHRASES)
+    best, best_score, best_method = None, 0.0, "none"
     for item in FAST_FAQ:
-        if not item.get("enabled", True):
-            continue
+        if not item.get("enabled", True): continue
         topic_tokens = faq_tokens(" ".join(item.get("keywords", []) + item.get("aliases", [])))
         for variant in item.get("variants", []):
             v_norm = " ".join(variant.lower().replace("ё","е").split())
             v_tokens = faq_tokens(variant)
+            method="token_overlap"
             if q_norm == v_norm:
-                score = 1.0
+                score, method = 1.0, "exact"
             elif v_norm in q_norm or q_norm in v_norm:
-                score = 0.94
+                score, method = 0.94, "variant"
             elif v_tokens:
                 overlap = len(q_tokens & v_tokens)
                 score = 0.55*(overlap/max(1,len(q_tokens))) + 0.45*(overlap/len(v_tokens))
-            else:
-                score = 0.0
-            if topic_tokens and not (q_tokens & topic_tokens):
-                score *= 0.4
-            # navigation phrases slightly favor section links
-            if item.get("type") == "section_link" and any(p in q_norm for p in ["где почитать","дай ссылку","скинь ссылку","обучалк","материал","раздел","где найти"]):
-                score += 0.05
+                if overlap: score += _concept_bonus(item, q_tokens)
+            else: score=0.0
+            if topic_tokens and not (q_tokens & topic_tokens): score *= 0.45
+            if item.get("type") == "section_link" and navigational: score += 0.08
+            # Situational/diagnostic questions should not be swallowed by generic section links.
+            if situational and item.get("type") == "section_link": score *= 0.50
             if score > best_score:
-                best, best_score = item, min(score, 1.0)
-    return (best, best_score) if best and best_score >= 0.72 else (None, best_score)
+                best, best_score, best_method = item, min(score,1.0), method
+    threshold = 0.72
+    return (best, best_score, best_method) if best and best_score >= threshold else (None, best_score, best_method)
 
 STOPWORDS = {
     "как","где","что","кто","куда","мне","можно","могу","ли","я","мы","вы","это",
@@ -198,10 +213,13 @@ def analytics(event: str, **fields: Any) -> None:
     log.info("ANALYTICS %s", json.dumps(payload, ensure_ascii=False))
 
 def normalize_tokens(text: str) -> list[str]:
-    return [
-        t.lower() for t in re.findall(r"[A-Za-zА-Яа-яЁё0-9._-]+", text)
-        if len(t) >= 2 and t.lower() not in STOPWORDS
-    ]
+    out=[]
+    for t in re.findall(r"[A-Za-zА-Яа-яЁё0-9._-]+", text):
+        low=t.lower().replace("ё","е")
+        if len(low) < 2 or low in STOPWORDS or low in FAQ_NOISE:
+            continue
+        out.append(_faq_word(low))
+    return list(dict.fromkeys(out))
 
 def local_search_queries(question: str, conversation: str) -> list[str]:
     """Fast deterministic variants. Prefer single terms / OR groups so CQL is not overly strict."""
@@ -237,7 +255,7 @@ async def search_one(query: str, limit: int = 8) -> list[dict]:
         text_clause = f'text ~ "{cql_escape(query)}"'
     cql = (
         f'space="{CONFLUENCE_SPACE_KEY}" AND type=page '
-        f'AND ancestor={ALLOWED_ROOT_PAGE_ID} AND {text_clause}'
+        f'AND (id={ALLOWED_ROOT_PAGE_ID} OR ancestor={ALLOWED_ROOT_PAGE_ID}) AND {text_clause}'
     )
     response = await confluence.get(
         "/wiki/rest/api/content/search",
@@ -264,16 +282,29 @@ async def search_one(query: str, limit: int = 8) -> list[dict]:
 
 def rerank(pages: list[dict], question: str) -> list[dict]:
     keywords = normalize_tokens(question)
+    qset=set(keywords)
     for p in pages:
-        title = p["title"].lower()
-        body = p["text"][:2500].lower()
-        overlap = sum(5 for k in keywords if k in title) + sum(1 for k in keywords if k in body)
-        p["score"] = p.get("hits", 1) * 7 + overlap
-    return sorted(
-        pages,
-        key=lambda p: (p["score"], p.get("modified", "")),
-        reverse=True,
-    )[:4]
+        title_tokens=set(normalize_tokens(p["title"]))
+        body_tokens=set(normalize_tokens(p["text"][:4000]))
+        title_hits=len(qset & title_tokens)
+        body_hits=len(qset & body_tokens)
+        coverage=(title_hits+body_hits)/max(1,len(qset))
+        p["title_hits"]=title_hits
+        p["body_hits"]=body_hits
+        p["coverage"]=round(coverage,3)
+        p["score"] = p.get("hits", 1) * 5 + title_hits * 8 + min(body_hits,4) * 2
+    return sorted(pages, key=lambda p: (p["score"], p.get("modified", "")), reverse=True)[:4]
+
+def relevance_gate(pages: list[dict], question: str) -> tuple[list[dict], float]:
+    if not pages: return [], 0.0
+    q=set(normalize_tokens(question))
+    if not q: return pages[:2], 1.0
+    kept=[]
+    for p in pages:
+        if p.get("title_hits",0) >= 1 or p.get("body_hits",0) >= 2 or p.get("hits",1) >= 2:
+            kept.append(p)
+    top_score=max((p.get("coverage",0.0) for p in kept), default=0.0)
+    return kept[:4], top_score
 
 async def retrieve(question: str, conversation: str) -> tuple[list[dict], list[str]]:
     t0 = time.perf_counter()
@@ -292,9 +323,13 @@ async def retrieve(question: str, conversation: str) -> tuple[list[dict], list[s
                 dedup[p["id"]]["hits"] += 1
                 dedup[p["id"]]["matched_queries"].append(p["matched_query"])
 
-    result = rerank(list(dedup.values()), question)
-    log.info("TIMING retrieval=%.2fs candidates=%d selected=%d",
-             time.perf_counter() - t0, len(dedup), len(result))
+    ranked = rerank(list(dedup.values()), question)
+    result, relevance = relevance_gate(ranked, question)
+    log.info("TIMING retrieval=%.2fs candidates=%d selected=%d relevance=%.3f",
+             time.perf_counter() - t0, len(dedup), len(result), relevance)
+    for p in result:
+        log.info("RETRIEVAL page=%s title=%r score=%s title_hits=%s body_hits=%s hits=%s",
+                 p["id"], p["title"], p.get("score"), p.get("title_hits"), p.get("body_hits"), p.get("hits"))
     return result, queries
 
 async def generate_answer(question: str, conversation: str, pages: list[dict]) -> str:
@@ -335,21 +370,26 @@ CONTENT:
     log.info("TIMING final_answer=%.2fs", time.perf_counter() - t0)
     answer = (response.output_text or "").strip()
     if not answer:
-        log.warning("OpenAI returned empty output")
-        analytics("empty_model_output")
+        status=getattr(response, "status", None)
+        incomplete=getattr(response, "incomplete_details", None)
+        usage=getattr(response, "usage", None)
+        output=getattr(response, "output", None)
+        log.warning("OpenAI returned empty output status=%r incomplete_details=%r usage=%r output_types=%r",
+                    status, incomplete, usage, [getattr(x, "type", None) for x in (output or [])])
+        analytics("empty_model_output", response_status=str(status), incomplete_details=str(incomplete), usage=str(usage))
         return "Не нашёл эту информацию в базе знаний Whitech 😔 Напишите @MiaA_01t — она поможет разобраться."
     return answer
 
 async def build_answer(question: str, chat_id: int) -> str:
     t0 = time.perf_counter()
-    faq_item, faq_score = find_fast_faq(question)
+    faq_item, faq_score, faq_method = find_fast_faq(question)
     if faq_item:
         elapsed = round(time.perf_counter() - t0, 4)
         log.info("FAST_FAQ hit id=%s score=%.3f", faq_item["id"], faq_score)
-        analytics("fast_faq", faq_id=faq_item["id"], latency_seconds=elapsed)
+        analytics("fast_faq", faq_id=faq_item["id"], match_method=faq_method, score=round(faq_score,3), latency_seconds=elapsed)
         return render_fast_item(faq_item)
 
-    log.info("FAST_FAQ miss best_score=%.3f; using Confluence", faq_score)
+    log.info("FAST_FAQ miss best_score=%.3f method=%s; using Confluence", faq_score, faq_method)
     conversation = compact_history(chat_id)
     pages, queries = await retrieve(question, conversation)
 
@@ -362,7 +402,11 @@ async def build_answer(question: str, chat_id: int) -> str:
     analytics(
         "answered",
         latency_seconds=elapsed,
+        route="confluence",
+        faq_best_score=round(faq_score,3),
+        faq_match_method=faq_method,
         source_page_ids=[p["id"] for p in pages[:3]],
+        retrieval_scores=[p.get("score") for p in pages[:3]],
         query_count=len(queries),
     )
     log.info("TIMING total=%.2fs", time.perf_counter() - t0)
@@ -391,7 +435,8 @@ async def question(message: Message):
     started = time.perf_counter()
 
     try:
-        answer = await build_answer(question_text, message.chat.id)
+        async with user_locks[message.chat.id]:
+            answer = await build_answer(question_text, message.chat.id)
     except httpx.HTTPStatusError as exc:
         log.exception("Confluence HTTP error")
         analytics("error", error_type="ConfluenceHTTP", status=exc.response.status_code)
@@ -418,7 +463,7 @@ async def question(message: Message):
 
 async def main():
     log.info(
-        "Starting Whitech Helper v8.2-robust-router; space=%s root=%s model=%s",
+        "Starting Whitech Helper v8.3-intent-retrieval; space=%s root=%s model=%s",
         CONFLUENCE_SPACE_KEY, ALLOWED_ROOT_PAGE_ID, OPENAI_MODEL
     )
     try:
