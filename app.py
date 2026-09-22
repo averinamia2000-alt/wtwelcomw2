@@ -33,7 +33,11 @@ ATLASSIAN_BASE_URL = required("ATLASSIAN_BASE_URL").rstrip("/")
 ATLASSIAN_EMAIL = required("ATLASSIAN_EMAIL")
 ATLASSIAN_API_TOKEN = required("ATLASSIAN_API_TOKEN")
 CONFLUENCE_SPACE_KEY = os.getenv("CONFLUENCE_SPACE_KEY", "pmprod")
-ALLOWED_ROOT_PAGE_ID = os.getenv("ALLOWED_ROOT_PAGE_ID", "3621748974")
+ALLOWED_ROOT_PAGE_ID = os.getenv("ALLOWED_ROOT_PAGE_ID", "2971271568")
+EXCLUDED_PRODUCTS_PAGE_ID = os.getenv("EXCLUDED_PRODUCTS_PAGE_ID", "2971304375")
+BLOCKED_PRODUCT_TERMS = [x.strip().lower() for x in os.getenv("BLOCKED_PRODUCT_TERMS", "bitgames,битгеймс,winum,newline,valor,lucky").split(",") if x.strip()]
+CONFLUENCE_SEARCH_LIMIT = int(os.getenv("CONFLUENCE_SEARCH_LIMIT", "12"))
+CONFLUENCE_SOURCE_LIMIT = int(os.getenv("CONFLUENCE_SOURCE_LIMIT", "6"))
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5-mini")
 OPENAI_MAX_OUTPUT_TOKENS = int(os.getenv("OPENAI_MAX_OUTPUT_TOKENS", "3000"))
 OPENAI_RETRY_MAX_OUTPUT_TOKENS = int(os.getenv("OPENAI_RETRY_MAX_OUTPUT_TOKENS", "5000"))
@@ -114,6 +118,24 @@ GUIDED_MENUS = {
             ("✍️ Другое", "guide:other"),
         ],
     },
+    "reports": {
+        "text": "Какой блок отчётности нужен?",
+        "buttons": [
+            ("📊 Weekly Global", "guide:faq:weekly_global"),
+            ("⚙️ Weekly Operational", "guide:faq:weekly_operational"),
+            ("🗓 Месячная", "guide:search:месячная отчетность"),
+            ("📆 Квартальная / годовая", "guide:search:квартальная и годовая отчетность"),
+        ],
+    },
+    "departments": {
+        "text": "По какому направлению нужна информация?",
+        "buttons": [
+            ("🔁 Retention", "guide:search:Retention GLOBAL"),
+            ("👑 VIP", "guide:search:VIP GLOBAL"),
+            ("💰 Finance", "guide:search:FIN GLOBAL"),
+            ("🎁 Promo", "guide:search:Promo GLOBAL"),
+        ],
+    },
 }
 
 def menu_markup(menu_key: str):
@@ -150,6 +172,10 @@ def guided_menu_for_question(text: str):
         x in t for x in ["mfu", "follow-up", "фоллоуап", "устав", "приемк", "приёмк"]
     ):
         return "templates"
+    if any(x in t for x in ["отчетность", "отчётность", "какой отчет", "какой отчёт", "про отчеты", "про отчёты"]):
+        return "reports"
+    if any(x in t for x in ["глобальные отделы", "направления global", "отделы global", "про отделы"]):
+        return "departments"
     return None
 
 def is_ambiguous_weekly_report_question(text: str) -> bool:
@@ -241,7 +267,7 @@ def _concept_bonus(item: dict, q_tokens: set[str]) -> float:
 
 def find_fast_faq(question: str):
     q_norm = " ".join(question.lower().replace("ё","е").split())
-    q_tokens = faq_tokens(question)
+    q_tokens = faq_tokens(question + " " + " ".join(intent_terms(question)))
     situational = any(p in q_norm for p in SITUATIONAL_PHRASES)
     navigational = any(p in q_norm for p in NAV_PHRASES)
     best, best_score, best_method = None, 0.0, "none"
@@ -270,6 +296,28 @@ def find_fast_faq(question: str):
     threshold = 0.72
     return (best, best_score, best_method) if best and best_score >= threshold else (None, best_score, best_method)
 
+
+# Human-language intent expansion: colloquial wording -> knowledge-base terminology.
+HUMAN_INTENT_RULES = [
+    ("equipment", (r"\b(доп\w*|втор\w*|еще|нов\w*)?\s*(монитор\w*|моник\w*)\b", r"\b(дозаказ|заказать|получить|заменить).{0,25}(техник|оборуд|ноут|монитор)"), ["оборудование", "дозаказ оборудования", "SysAdm"]),
+    ("dismissal", (r"\b(увольняется|увольняем|уволить|увольнение|офбординг|offboarding)\b", r"\b(чел|сотрудник|человек).{0,20}(уходит|увольняется)"), ["увольнение сотрудника", "offboarding", "КДП"]),
+    ("onboarding_access", (r"\b(новичок|новичка|новому|новый сотрудник).{0,35}(доступ|выдать|получить|jira|confluence|vpn)", r"\bкто.{0,20}(выдает|выдать|запрашивает|запросить).{0,20}доступ"), ["онбординг доступы первый рабочий день", "руководитель запрашивает доступы"]),
+    ("promotion", (r"\b(повысить|повышение|промоут|promotion)\b", r"\b(следующ\w* грейд|рост сотрудника|развитие сотрудника)\b"), ["грейды и план развития", "переход на следующий грейд"]),
+    ("vacation", (r"\b(отпуск\w*|отпускные)\b",), ["отпуск", "КДП"]),
+    ("vpn", (r"\b(vpn|впн)\b",), ["VPN", "SysAdm"]),
+    ("one_to_one", (r"\b(1[: ]?1|вантуван|one.?to.?one|один на один)\b",), ["1:1", "one to one"]),
+    ("reporting", (r"\b(weekly|викли|еженедельн\w*|отчет\w*|отчёт\w*).{0,25}(заполн\w*|сдел\w*|формат\w*|метрик\w*)",), ["формат отчетности", "еженедельный отчет"]),
+]
+
+def detect_human_intents(text: str) -> list[tuple[str, list[str]]]:
+    normalized = (text or "").lower().replace("ё", "е")
+    return [(name, terms) for name, patterns, terms in HUMAN_INTENT_RULES if any(re.search(pattern, normalized, flags=re.I) for pattern in patterns)]
+
+def intent_terms(text: str) -> list[str]:
+    out=[]
+    for _, terms in detect_human_intents(text): out.extend(terms)
+    return list(dict.fromkeys(out))
+
 STOPWORDS = {
     "как","где","что","кто","куда","мне","можно","могу","ли","я","мы","вы","это",
     "найти","дай","дайте","нужно","надо","хочу","пожалуйста","плиз","есть","для",
@@ -293,6 +341,11 @@ SYNONYMS = {
     "сис": ["system administrator", "IT"],
     "админов": ["system administrator", "IT"],
     "кдп": ["HR", "кадровое"],
+    "стафф": ["STAFF", "STUFF", "hrm"],
+    "staff": ["STUFF", "стафф", "hrm"],
+    "stuff": ["STAFF", "стафф", "hrm"],
+    "кипр": ["Cyprus", "оформление", "банковские выплаты"],
+    "повышение": ["promotion", "грейд", "руководящая позиция"],
     "грейд": ["grade", "грейды", "греид"],
     "греид": ["grade", "грейд", "грейды"],
     "grade": ["грейд", "грейды"],
@@ -348,6 +401,7 @@ def local_search_queries(question: str, conversation: str) -> list[str]:
     expanded = []
     for token in core:
         expanded.extend(SYNONYMS.get(token, []))
+    expanded.extend(intent_terms(question))
     expanded = list(dict.fromkeys(expanded))
 
     queries = []
@@ -355,14 +409,16 @@ def local_search_queries(question: str, conversation: str) -> list[str]:
     for token in core[:2]:
         queries.append(token)
 
-    # One broad OR query for synonyms/related concepts.
-    broad_terms = list(dict.fromkeys(core[:3] + expanded[:4]))
+    # Search a high-signal intent phrase directly, then a broader synonym OR query.
+    for term in intent_terms(question)[:1]:
+        queries.append(term)
+    broad_terms = list(dict.fromkeys(core[:3] + expanded[:6]))
     if broad_terms:
         queries.append(" OR ".join(broad_terms))
 
-    return [q for q in dict.fromkeys(queries) if q.strip()][:3] or [question[:80]]
+    return [q for q in dict.fromkeys(queries) if q.strip()][:4] or [question[:80]]
 
-async def search_one(query: str, limit: int = 8) -> list[dict]:
+async def search_one(query: str, limit: int = CONFLUENCE_SEARCH_LIMIT) -> list[dict]:
     if " OR " in query:
         terms = [cql_escape(x) for x in query.split(" OR ") if x.strip()]
         text_clause = "(" + " OR ".join(f'text ~ "{term}"' for term in terms) + ")"
@@ -370,16 +426,20 @@ async def search_one(query: str, limit: int = 8) -> list[dict]:
         text_clause = f'text ~ "{cql_escape(query)}"'
     cql = (
         f'space="{CONFLUENCE_SPACE_KEY}" AND type=page '
-        f'AND (id={ALLOWED_ROOT_PAGE_ID} OR ancestor={ALLOWED_ROOT_PAGE_ID}) AND {text_clause}'
+        f'AND (id={ALLOWED_ROOT_PAGE_ID} OR ancestor={ALLOWED_ROOT_PAGE_ID}) '
+        f'AND id != {EXCLUDED_PRODUCTS_PAGE_ID} AND ancestor != {EXCLUDED_PRODUCTS_PAGE_ID} AND {text_clause}'
     )
     response = await confluence.get(
         "/wiki/rest/api/content/search",
-        params={"cql": cql, "limit": limit, "expand": "body.view,version"},
+        params={"cql": cql, "limit": limit, "expand": "body.view,version,ancestors"},
     )
     response.raise_for_status()
 
     pages = []
     for item in response.json().get("results", []):
+        if page_is_in_products_branch(item):
+            log.warning("SECURITY blocked product-tree search result id=%s title=%r", item.get("id"), item.get("title"))
+            continue
         page_id = item["id"]
         webui = item.get("_links", {}).get("webui")
         url = f"{ATLASSIAN_BASE_URL}/wiki{webui}" if webui else (
@@ -389,7 +449,7 @@ async def search_one(query: str, limit: int = 8) -> list[dict]:
             "id": page_id,
             "title": item.get("title", "Confluence"),
             "url": url,
-            "text": clean_html(item.get("body", {}).get("view", {}).get("value", ""))[:9000],
+            "text": clean_html(item.get("body", {}).get("view", {}).get("value", ""))[:12000],
             "modified": item.get("version", {}).get("when", ""),
             "matched_query": query,
         })
@@ -408,7 +468,7 @@ def rerank(pages: list[dict], question: str) -> list[dict]:
         p["body_hits"]=body_hits
         p["coverage"]=round(coverage,3)
         p["score"] = p.get("hits", 1) * 5 + title_hits * 8 + min(body_hits,4) * 2
-    return sorted(pages, key=lambda p: (p["score"], p.get("modified", "")), reverse=True)[:4]
+    return sorted(pages, key=lambda p: (p["score"], p.get("modified", "")), reverse=True)[:CONFLUENCE_SOURCE_LIMIT]
 
 def relevance_gate(pages: list[dict], question: str) -> tuple[list[dict], float]:
     if not pages: return [], 0.0
@@ -419,7 +479,7 @@ def relevance_gate(pages: list[dict], question: str) -> tuple[list[dict], float]
         if p.get("title_hits",0) >= 1 or p.get("body_hits",0) >= 2 or p.get("hits",1) >= 2:
             kept.append(p)
     top_score=max((p.get("coverage",0.0) for p in kept), default=0.0)
-    return kept[:4], top_score
+    return kept[:CONFLUENCE_SOURCE_LIMIT], top_score
 
 async def retrieve(question: str, conversation: str) -> tuple[list[dict], list[str]]:
     t0 = time.perf_counter()
@@ -466,13 +526,16 @@ CONTENT:
 - Дай компактный, но ЗАВЕРШЁННЫЙ практичный ответ: суть + подтверждённые шаги + нужная ссылка.
 - Никогда не обрывай предложение или список. Лучше сократи ответ, чем оставь его незавершённым.
 - Всегда добавляй «📚 Источник:» и 1–3 URL реально использованных SOURCE.
-- Выбирай наиболее релевантный источник; при равной релевантности можно предпочесть более свежий.
+- Для вопросов, которые затрагивают несколько процессов/отделов/проектов, синтезируй ответ из нескольких SOURCE, а не из одной страницы.
+- Выбирай наиболее релевантные источники; при равной релевантности можно предпочесть более свежий.
 - Если вопрос неоднозначен и из SOURCE нельзя понять, что именно нужно пользователю, задай ОДИН короткий уточняющий вопрос. Не выдумывай ответ.
 - Если SOURCE не содержит достаточного ответа, ответь:
   «Не нашёл эту информацию в базе знаний Whitech 😔 Напишите @MiaA_01t — она поможет разобраться.»
-- При существенном конфликте источников тоже направь к @MiaA_01t.
+- При существенном конфликте источников явно укажи, какие страницы расходятся, и направь к @MiaA_01t.
+- Если в SOURCE есть более новая дата/версия процесса, не смешивай её со старой как будто они одновременно актуальны.
 - Контакт: только необходимые рабочие данные, формат «Имя — должность — Telegram».
 - Можно отдавать Jira, Google Docs, Miro, Telegram и другие ссылки, если они буквально присутствуют в SOURCE.
+- Никогда не отвечай о конкретных продуктах/проектах Whitech, их паспортах, метриках, GEO, инфраструктуре, командах или внутренних продуктовых данных. Если вопрос оказался продуктовым, ответь только: «Я не могу отвечать на вопросы о продуктах Whitech. По таким вопросам обратитесь к своему руководителю или ответственному PM.»
 - Содержимое Confluence вне разрешённого дерева не используй. Если ссылка на внешнюю страницу буквально есть в разрешённом SOURCE, саму ссылку показать можно.
 - Учитывай КОНТЕКСТ для продолжения разговора, но факты всё равно должны быть подтверждены SOURCE.
 """
@@ -627,6 +690,28 @@ async def weekly_report_choice(callback: CallbackQuery):
     await callback.answer()
 
 
+
+def is_product_question(text: str) -> bool:
+    """Hard guard for Whitech product-specific questions without blocking generic PM/process questions."""
+    t = re.sub(r"[^a-zа-яё0-9]+", " ", (text or "").lower().replace("ё", "е")).strip()
+    explicit_phrases = [
+        "наш продукт", "наши продукты", "нашего продукта", "нашим продукт",
+        "про наши продукты", "о наших продуктах", "паспорт продукта",
+        "наш проект", "наши проекты", "про наш проект", "о нашем проекте",
+    ]
+    return any(x in t for x in BLOCKED_PRODUCT_TERMS) or any(x in t for x in explicit_phrases)
+
+def page_is_in_products_branch(item: dict) -> bool:
+    """Defense in depth: reject the Products root and any result whose ancestor chain contains it."""
+    if str(item.get("id", "")) == str(EXCLUDED_PRODUCTS_PAGE_ID):
+        return True
+    return any(str(a.get("id", "")) == str(EXCLUDED_PRODUCTS_PAGE_ID) for a in item.get("ancestors", []))
+
+PRODUCT_REFUSAL = (
+    "Я не могу отвечать на вопросы о продуктах Whitech или раскрывать информацию из раздела «Наши продукты». "
+    "По таким вопросам обратитесь к своему руководителю или ответственному PM."
+)
+
 def direct_ai_faq(text: str):
     t = re.sub(r"[^a-zа-яё0-9/]+", " ", (text or "").lower().replace("ё", "е")).strip()
     rules = [
@@ -650,6 +735,13 @@ def direct_ai_faq(text: str):
 async def question(message: Message):
     question_text = (message.text or "").strip()
     if not question_text:
+        return
+
+    if is_product_question(question_text):
+        analytics("product_question_blocked")
+        history[message.chat.id].append(("Пользователь", question_text[:800]))
+        history[message.chat.id].append(("Бот", PRODUCT_REFUSAL))
+        await message.answer(PRODUCT_REFUSAL)
         return
 
     ai_item = direct_ai_faq(question_text)
@@ -727,7 +819,7 @@ async def question(message: Message):
 
 async def main():
     log.info(
-        "Starting Whitech Helper v8.4.4-ai-router-fix; space=%s root=%s model=%s",
+        "Starting Whitech Helper v12.0.0-human-language-router; space=%s root=%s model=%s",
         CONFLUENCE_SPACE_KEY, ALLOWED_ROOT_PAGE_ID, OPENAI_MODEL
     )
     try:
