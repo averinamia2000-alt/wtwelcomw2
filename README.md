@@ -1,45 +1,73 @@
-# Whitech Helper v8.4.4 — AI Router Fix
+Whitech Helper v11.0.0 — safe knowledge scope
 
-Current routing:
-`question -> guided/AI fast router -> FAQ -> Confluence/OpenAI fallback`
+Telegram-помогатор по внутренней базе Whitech. Ищет по разрешённой части дерева Welcome to Whitech, использует быстрый FAQ для частых вопросов и Confluence + OpenAI для составных вопросов.
 
-## What is included
-- Hard Confluence scope: PM Products root `3621748974` + descendants only
-- Guided UX menus
-- Fast FAQ with direct answers, contacts, Jira links and Confluence section links
-- Weekly Global / Weekly Operational routing
-- Templates menu
-- KDP quick links
-- SysAdmin contact
-- Correct FAME definition
-- AI tools for PM Whitech FAQ
-- Deterministic AI router before fuzzy FAQ / Confluence
-- OpenAI output-budget guard and retry for reasoning-only incomplete responses
+Ключевое правило: «Наши продукты» закрыты
 
-## AI FAQ
-Source:
-https://01tech.atlassian.net/wiki/spaces/pmprod/pages/3811803379/AI+tools+for+PM+Whitech
+Бот не имеет права отвечать о конкретных продуктах/проектах Whitech. Ветка Confluence Наши продукты (2971304375) и все её потомки исключены из поиска. Дополнительно каждый результат проверяется по ancestors перед попаданием в контекст модели. Вопросы с известными названиями продуктов и явные формулировки «наш продукт / наши продукты / паспорт продукта» блокируются до FAQ, Confluence и OpenAI.
 
-Dedicated topics:
-- allowed AI tools
-- model / effort selection
-- chat/context and hallucination guidance
-- `/goal`
-- skills/plugins/connectors/MCP
-- automation examples
-- AI security
-- code review
+При этом обычные PM-вопросы вроде «как создать устав проекта», «как поставить задачу», «как провести онбординг» не блокируются: слово «проект» само по себе не считается продуктовым запросом.
 
-For AI-related questions the bot should normally answer via `fast_ai_faq`
-without calling Confluence or OpenAI.
+Что улучшено
 
-## Expected startup log
-`Starting Whitech Helper v8.4.4-ai-router-fix; ...`
+scope: весь разрешённый Welcome, кроме закрытой продуктовой ветки;
 
-## Files
-- `app.py` — bot
-- `faq.json` — fast FAQ
-- `.env.example` — environment variable example
-- `requirements.txt` — Python dependencies
+defense-in-depth: CQL exclusion + проверка ancestor chain + pre-router guard + запрет в model instructions;
 
-Jira API is not called. Approved Jira URLs are stored as static quick links.
+до 6 релевантных Confluence-источников для составного ответа;
+
+актуализирован онбординг по регламенту от 18.09.2026;
+
+добавлены правила еженедельной/ежемесячной отчётности;
+
+сохранены быстрые сценарии по STAFF, увольнению, КДП, отпуску, доступам, трафику/FAME, AI, шаблонам, управлению людьми и другим непродуктовым процессам;
+
+STUFF поддерживается как алиас, корректное название — STAFF;
+
+документация больше не заявляет, что продуктовые страницы входят в scope.
+
+Как отвечает бот
+
+question -> product safety guard -> guided/fast FAQ -> safe Confluence retrieval -> relevance gate -> OpenAI synthesis
+
+Если разрешённые источники не содержат ответа, бот не додумывает и направляет к @MiaA_01t.
+
+Переменные окружения
+
+Обязательные: TELEGRAM_BOT_TOKEN, OPENAI_API_KEY, ATLASSIAN_BASE_URL, ATLASSIAN_EMAIL, ATLASSIAN_API_TOKEN.
+
+Основные опциональные:
+
+CONFLUENCE_SPACE_KEY=pmprod
+
+ALLOWED_ROOT_PAGE_ID=2971271568
+
+EXCLUDED_PRODUCTS_PAGE_ID=2971304375
+
+BLOCKED_PRODUCT_TERMS=bitgames,битгеймс,winum,newline,valor,lucky
+
+CONFLUENCE_SEARCH_LIMIT=12
+
+CONFLUENCE_SOURCE_LIMIT=6
+
+OPENAI_MODEL=gpt-5-mini
+
+BLOCKED_PRODUCT_TERMS можно дополнять при появлении новых названий продуктов; основная защита при этом всё равно строится на исключении всей продуктовой ветки Confluence.
+
+Ожидаемый startup log: Starting Whitech Helper v11.0.0-safe-knowledge; ...
+
+v12 — Human Language Router
+
+Добавлен слой понимания разговорных формулировок перед FAQ и Confluence search. Он переводит бытовые запросы в термины базы знаний, не меняя security boundary по продуктам.
+
+Примеры маршрутизации:
+
+«куда идти за доп монитором?» → оборудование / дозаказ оборудования / SysAdm;
+
+«чел увольняется что мне делать» → увольнение сотрудника / offboarding / КДП;
+
+«кто должен выдать доступ новичку» → онбординг / доступы первого дня / ответственность руководителя;
+
+«хочу повысить сотрудника» → грейды / план развития / переход на следующий грейд.
+
+Router работает детерминированно: распознанные intent-термины усиливают и fast FAQ matching, и CQL retrieval. Для поиска добавляется отдельный high-signal запрос и расширенный OR-запрос. Это повышает recall без передачи продуктовой ветки модели.
